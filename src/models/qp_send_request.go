@@ -48,6 +48,7 @@ type QpSendRequest struct {
 	Poll     *whatsapp.WhatsappPoll     `json:"poll,omitempty"`     // Poll if exists
 	Location *whatsapp.WhatsappLocation `json:"location,omitempty"` // Location if exists
 	Contact  *whatsapp.WhatsappContact  `json:"contact,omitempty"`  // Contact if exists
+	List     *whatsapp.WhatsappList     `json:"list,omitempty"`     // List if exists
 }
 
 // get default log entry, never nil
@@ -111,6 +112,7 @@ func (source *QpSendRequest) ToWhatsappMessage() (msg *whatsapp.WhatsappMessage,
 	}
 
 	msg.Poll = source.Poll
+	msg.List = source.List
 
 	// Check if this is a contact message
 	if source.Contact != nil {

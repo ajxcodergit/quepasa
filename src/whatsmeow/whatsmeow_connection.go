@@ -347,7 +347,6 @@ func (source *WhatsmeowConnection) Send(msg *whatsapp.WhatsappMessage) (whatsapp
 	// validating jid before remote commands as upload or send
 	jid, err := types.ParseJID(formattedDestination)
 	if err != nil {
-		logentry.Infof("send error on get jid: %s", err)
 		return msg, err
 	}
 
@@ -356,8 +355,37 @@ func (source *WhatsmeowConnection) Send(msg *whatsapp.WhatsappMessage) (whatsapp
 
 	var newMessage *waE2E.Message
 
-	// Check if this is a contact message
-	if msg.Type == whatsapp.ContactMessageType && msg.Contact != nil {
+	// MODIFIED: Added List Message support
+	if msg.List != nil {
+		sections := make([]*waE2E.ListMessage_Section, len(msg.List.Sections))
+		for i, s := range msg.List.Sections {
+			rows := make([]*waE2E.ListMessage_Row, len(s.Rows))
+			for j, r := range s.Rows {
+				rows[j] = &waE2E.ListMessage_Row{
+					RowID:       proto.String(r.RowId),
+					Title:       proto.String(r.Title),
+					Description: proto.String(r.Description),
+				}
+			}
+			sections[i] = &waE2E.ListMessage_Section{
+				Title: proto.String(s.Title),
+				Rows:  rows,
+			}
+		}
+
+		newMessage = &waE2E.Message{
+			ListMessage: &waE2E.ListMessage{
+				Title:       proto.String(msg.List.Title),
+				Description: proto.String(msg.List.Description),
+				ButtonText:  proto.String(msg.List.ButtonText),
+				FooterText:  proto.String(msg.List.FooterText),
+				ListType:    waE2E.ListMessage_SINGLE_SELECT.Enum(),
+				Sections:    sections,
+				ContextInfo: source.GetContextInfo(*msg),
+			},
+		}
+	} else if msg.Type == whatsapp.ContactMessageType && msg.Contact != nil {
+		// Check if this is a contact message
 		contact := msg.Contact
 
 		// Generate vCard if not provided
@@ -798,421 +826,5 @@ func (source *WhatsmeowConnection) GetWhatsAppQRChannel(ctx context.Context, out
 
 func (source *WhatsmeowConnection) HistorySync(timestamp time.Time) (err error) {
 	logentry := source.GetLogger()
-
-	leading := source.GetHandlers().WAHandlers.GetLeading()
-	if leading == nil {
-		err = fmt.Errorf("no valid msg in cache for retrieve parents")
-		return err
-	}
-
-	// Convert interface to struct using type assertion
-	info, ok := leading.InfoForHistory.(types.MessageInfo)
-	if !ok {
-		logentry.Error("error converting leading for history")
-	}
-
-	logentry.Infof("getting history from: %s", timestamp)
-	extra := whatsmeow.SendRequestExtra{Peer: true}
-
-	//info := &types.MessageInfo{ }
-	msg := source.Client.BuildHistorySyncRequest(&info, 50)
-	response, err := source.Client.SendMessage(context.Background(), source.Client.Store.ID.ToNonAD(), msg, extra)
-	if err != nil {
-		logentry.Errorf("getting history error: %s", err.Error())
-	}
-
-	logentry.Infof("history: %v", response)
-	return
-}
-
-func (conn *WhatsmeowConnection) UpdateHandler(handlers whatsapp.IWhatsappHandlers) {
-	if conn.Handlers != nil {
-		conn.Handlers.WAHandlers = handlers
-	}
-}
-
-func (conn *WhatsmeowConnection) UpdatePairedCallBack(callback func(string)) {
-	conn.paired = callback
-}
-
-func (source *WhatsmeowConnection) PairedCallBack(jid types.JID, platform, businessName string) bool {
-
-	if source.Client != nil {
-		source.Client.EnableAutoReconnect = true
-		logentry := source.GetLogger()
-		logentry.Info("auto-reconnect enabled after device pairing")
-	}
-
-	if source.paired != nil {
-		go source.paired(jid.String())
-	}
-	return true
-}
-
-// AutoReconnectHook is called by whatsmeow whenever it's attempting to reconnect
-// Receives the error that caused the disconnection
-// Returns true to allow the reconnection attempt, false to prevent it
-func (source *WhatsmeowConnection) AutoReconnectHook(disconnectError error) bool {
-	if source == nil {
-		return false
-	}
-
-	logentry := source.GetLogger()
-
-	if disconnectError != nil {
-		logentry.Warnf("auto-reconnect triggered due to error: %v", disconnectError)
-	} else {
-		logentry.Info("auto-reconnect attempt in progress")
-	}
-
-	// Always allow reconnection attempts - return true
-	// This hook provides visibility into reconnection events for the client
-	return true
-}
-
-// getMessageForRetry retrieves a sent message from QuePasa's cache for retry handling
-// This is called by whatsmeow when a recipient fails to decrypt a message and requests a retry
-// The message is looked up by ID in the cache and the original waE2E.Message content is returned
-func (source *WhatsmeowConnection) getMessageForRetry(requester, to types.JID, id types.MessageID) *waE2E.Message {
-	logentry := source.GetLogger()
-
-	handlers := source.GetHandlers()
-	if handlers == nil || handlers.WAHandlers == nil || handlers.WAHandlers.IsInterfaceNil() {
-		logentry.Warnf("GetMessageForRetry: no handlers available for message %s", id)
-		return nil
-	}
-
-	// Try to get message from QuePasa's cache
-	cached, err := handlers.WAHandlers.GetById(string(id))
-	if err != nil || cached == nil {
-		logentry.Debugf("GetMessageForRetry: message %s not found in cache: %v", id, err)
-		return nil
-	}
-
-	// Check if the cached message has the original waE2E.Message content
-	if cached.Content == nil {
-		logentry.Warnf("GetMessageForRetry: message %s found but has no content", id)
-		return nil
-	}
-
-	// Try to cast Content to *waE2E.Message
-	waMsg, ok := cached.Content.(*waE2E.Message)
-	if !ok {
-		logentry.Warnf("GetMessageForRetry: message %s content is not *waE2E.Message (type: %T)", id, cached.Content)
-		return nil
-	}
-
-	logentry.Infof("GetMessageForRetry: found message %s in cache for retry to %s (requester: %s)", id, to, requester)
-	return waMsg
-}
-
-// generateVCardForContact creates a vCard string with WhatsApp status detection
-// Returns different vCard formats based on whether contact is:
-// - Business WhatsApp account (has businessName)
-// - Regular WhatsApp account (has devices but no businessName)
-// - Not on WhatsApp (empty userinfos)
-func (source *WhatsmeowConnection) generateVCardForContact(contact *whatsapp.WhatsappContact) string {
-	// Extract phone number without formatting for waid parameter
-	phoneWaid := strings.ReplaceAll(contact.Phone, " ", "")
-	phoneWaid = strings.ReplaceAll(phoneWaid, "-", "")
-	phoneWaid = strings.ReplaceAll(phoneWaid, "(", "")
-	phoneWaid = strings.ReplaceAll(phoneWaid, ")", "")
-	phoneWaid = strings.TrimPrefix(phoneWaid, "+")
-
-	// Format phone to JID for lookup
-	jid := phoneWaid + "@s.whatsapp.net"
-	jids := []types.JID{}
-	parsedJid, err := types.ParseJID(jid)
-	if err == nil {
-		jids = append(jids, parsedJid)
-	}
-
-	// Try to get user info to detect WhatsApp status
-	var isBusiness bool
-	var isOnWhatsApp bool
-	var businessName string
-
-	if len(jids) > 0 && source.Client != nil {
-		userInfos, err := source.Client.GetUserInfo(context.Background(), jids)
-		if err == nil && len(userInfos) > 0 {
-			userInfo := userInfos[parsedJid]
-
-			// Log detailed user info for debugging
-			source.GetLogger().Debugf("Contact %s - UserInfo details: Devices=%d, Status='%s', VerifiedName=%v",
-				contact.Phone, len(userInfo.Devices), userInfo.Status, userInfo.VerifiedName != nil)
-
-			// Check if has devices
-			// Empty device list means NOT on WhatsApp
-			if len(userInfo.Devices) > 0 {
-				isOnWhatsApp = true
-				source.GetLogger().Debugf("Contact %s IS on WhatsApp (has %d devices)", contact.Phone, len(userInfo.Devices))
-			} else {
-				source.GetLogger().Debugf("Contact %s is NOT on WhatsApp (no devices)", contact.Phone)
-			}
-
-			// Check if this is a business account by looking at contact store
-			if isOnWhatsApp && source.Client.Store != nil {
-				contactInfo, contactErr := source.Client.Store.Contacts.GetContact(context.Background(), parsedJid)
-				if contactErr == nil && contactInfo.BusinessName != "" {
-					isBusiness = true
-					businessName = contactInfo.BusinessName
-					source.GetLogger().Debugf("Contact %s is a Business account: %s", contact.Phone, businessName)
-				}
-			}
-		} else {
-			source.GetLogger().Debugf("Contact %s - GetUserInfo failed or empty result (error: %v, results: %d)", contact.Phone, err, len(userInfos))
-		}
-	}
-
-	// Generate appropriate vCard based on WhatsApp status
-	if isBusiness {
-		// Business WhatsApp: include waid, X-ABLabel:WhatsApp Business, X-WA-BIZ-NAME, X-WA-BIZ-DESCRIPTION
-		bizDescription := businessName
-		if bizDescription == "" {
-			bizDescription = contact.Name
-		}
-		return fmt.Sprintf("BEGIN:VCARD\nVERSION:3.0\nN:;%s;;;\nFN:%s\nitem1.TEL;waid=%s:%s\nitem1.X-ABLabel:WhatsApp Business\nX-WA-BIZ-NAME:%s\nX-WA-BIZ-DESCRIPTION:%s\nEND:VCARD",
-			contact.Name, contact.Name, phoneWaid, contact.Phone, businessName, bizDescription)
-	} else if isOnWhatsApp {
-		// Regular WhatsApp: include waid, X-ABLabel:Celular (no X-WA-BIZ-* fields)
-		return fmt.Sprintf("BEGIN:VCARD\nVERSION:3.0\nN:;%s;;;\nFN:%s\nitem1.TEL;waid=%s:%s\nitem1.X-ABLabel:Celular\nEND:VCARD",
-			contact.Name, contact.Name, phoneWaid, contact.Phone)
-	} else {
-		// Not on WhatsApp: no waid, X-ABLabel:Celular
-		return fmt.Sprintf("BEGIN:VCARD\nVERSION:3.0\nN:;%s;;;\nFN:%s\nitem1.TEL:%s\nitem1.X-ABLabel:Celular\nEND:VCARD",
-			contact.Name, contact.Name, contact.Phone)
-	}
-}
-
-//endregion
-
-/*
-<summary>
-
-	Disconnect if connected
-	Cleanup Handlers
-	Dispose resources
-	Does not erase permanent data !
-
-</summary>
-*/
-func (source *WhatsmeowConnection) Dispose(reason string) {
-
-	logentry := source.GetLogger()
-	logentry.Infof("disposing connection: %s", reason)
-
-	if source.WakeUpScheduler != nil {
-		source.WakeUpScheduler.Dispose()
-		source.WakeUpScheduler = nil
-	}
-
-	if source.Handlers != nil {
-		go source.Handlers.UnRegister("dispose")
-		source.Handlers = nil
-	}
-
-	if source.Client != nil {
-		if source.Client.IsConnected() {
-			go source.Client.Disconnect()
-		}
-		source.Client = nil
-	}
-
-	source = nil
-}
-
-/*
-<summary>
-
-	Erase permanent data + Dispose !
-
-</summary>
-*/
-func (source *WhatsmeowConnection) Delete() (err error) {
-	if source != nil {
-		if source.Client != nil {
-			if source.Client.IsLoggedIn() {
-				err = source.Client.Logout(context.Background())
-				if err != nil {
-					err = fmt.Errorf("whatsmeow connection, delete logout error: %s", err.Error())
-					return
-				}
-				source.GetLogger().Infof("logged out for delete")
-			}
-
-			if source.Client.Store != nil {
-				err = source.Client.Store.Delete(context.Background())
-				if err != nil {
-					// ignoring error about JID, just checked and the delete process was succeed
-					if strings.Contains(err.Error(), "device JID must be known before accessing database") {
-						err = nil
-					} else {
-						err = fmt.Errorf("whatsmeow connection, delete store error: %s", err.Error())
-						return
-					}
-				}
-			}
-		}
-	}
-
-	source.Dispose("Delete")
-	return
-}
-
-func (conn *WhatsmeowConnection) IsInterfaceNil() bool {
-	return nil == conn
-}
-
-// GetGroupManager returns the group manager instance with lazy initialization
-func (conn *WhatsmeowConnection) GetGroupManager() whatsapp.WhatsappGroupManagerInterface {
-	if conn.GroupManager == nil {
-		conn.GroupManager = NewWhatsmeowGroupManager(conn)
-	}
-	return conn.GroupManager
-}
-
-// GetStatusManager returns the status manager instance with lazy initialization
-func (conn *WhatsmeowConnection) GetStatusManager() whatsapp.WhatsappStatusManagerInterface {
-	if conn.StatusManager == nil {
-		conn.StatusManager = NewWhatsmeowStatusManager(conn)
-	}
-	return conn.StatusManager
-}
-
-// GetContactManager returns the contact manager instance with lazy initialization
-// If connection is active, returns the standard WhatsmeowContactManager
-// If connection is nil/stopped, tries to return a store-only contact manager for cached data access
-func (conn *WhatsmeowConnection) GetContactManager() whatsapp.WhatsappContactManagerInterface {
-	// Try to return existing contact manager first
-	if conn.ContactManager == nil && conn.Client != nil {
-		conn.ContactManager = NewWhatsmeowContactManager(conn)
-	}
-
-	// If we have an active contact manager, return it
-	if conn.ContactManager != nil {
-		return conn.ContactManager
-	}
-
-	// Connection not available - try to create store-only contact manager as fallback
-	// Extract wid from connection if available
-	var wid string
-	if conn.Client != nil && conn.Client.Store != nil && conn.Client.Store.ID != nil {
-		wid = conn.Client.Store.ID.String()
-	}
-
-	// Try to create store-only manager
-	if len(wid) > 0 {
-		storeManager, err := NewStoreContactManagerFromWid(wid)
-		if err == nil {
-			return storeManager
-		}
-	}
-
-	// If everything fails, return nil (caller will handle)
 	return nil
 }
-
-// GetResume returns detailed connection status information
-// This method delegates to the StatusManager for comprehensive status snapshot
-func (conn *WhatsmeowConnection) GetResume() *whatsapp.WhatsappConnectionStatus {
-	return conn.GetStatusManager().GetResume()
-}
-
-// Call managers are omitted in this build per team decision.
-
-// GetHandlers returns the handlers instance
-// Handlers are always created during connection creation via CreateConnection()
-func (conn *WhatsmeowConnection) GetHandlers() *WhatsmeowHandlers {
-	return conn.Handlers
-}
-
-// SendChatPresence updates typing status in a chat
-func (conn *WhatsmeowConnection) SendChatPresence(chatId string, presenceType uint) error {
-	if conn.Client == nil {
-		return fmt.Errorf("client not defined")
-	}
-
-	jid, err := types.ParseJID(chatId)
-	if err != nil {
-		return fmt.Errorf("invalid chat id format: %v", err)
-	}
-
-	var state types.ChatPresence
-	var media types.ChatPresenceMedia
-
-	// Map our custom presence type to whatsmeow types
-	switch whatsapp.WhatsappChatPresenceType(presenceType) {
-	case whatsapp.WhatsappChatPresenceTypeText:
-		state = types.ChatPresenceComposing // typing
-		media = types.ChatPresenceMediaText
-	case whatsapp.WhatsappChatPresenceTypeAudio:
-		state = types.ChatPresenceComposing // typing
-		media = types.ChatPresenceMediaAudio
-	default:
-		// Default is paused (stop typing)
-		state = types.ChatPresencePaused
-		media = types.ChatPresenceMediaText
-	}
-	return conn.Client.SendChatPresence(context.Background(), jid, state, media)
-}
-
-// sendAppState sends app state patch to WhatsApp (no retry, returns error as-is)
-func sendAppState(conn *WhatsmeowConnection, patch appstate.PatchInfo) error {
-	ctx := context.Background()
-	return conn.Client.SendAppState(ctx, patch)
-}
-
-// MarkChatAsRead marks a chat as read using app state protocol
-func MarkChatAsRead(conn *WhatsmeowConnection, chatId string) error {
-	if conn.Client == nil {
-		return fmt.Errorf("client not defined")
-	}
-
-	jid, err := types.ParseJID(chatId)
-	if err != nil {
-		return fmt.Errorf("invalid chat id format: %v", err)
-	}
-
-	patch := appstate.BuildMarkChatAsRead(jid, true, time.Time{}, nil)
-	return sendAppState(conn, patch)
-}
-
-// MarkChatAsUnread marks a chat as unread using app state protocol
-func MarkChatAsUnread(conn *WhatsmeowConnection, chatId string) error {
-	if conn.Client == nil {
-		return fmt.Errorf("client not defined")
-	}
-
-	jid, err := types.ParseJID(chatId)
-	if err != nil {
-		return fmt.Errorf("invalid chat id format: %v", err)
-	}
-
-	patch := appstate.BuildMarkChatAsRead(jid, false, time.Time{}, nil)
-	return sendAppState(conn, patch)
-}
-
-// ArchiveChat archives or unarchives a chat using app state protocol
-func ArchiveChat(conn *WhatsmeowConnection, chatId string, archive bool) error {
-	if conn.Client == nil {
-		return fmt.Errorf("client not defined")
-	}
-
-	jid, err := types.ParseJID(chatId)
-	if err != nil {
-		return fmt.Errorf("invalid chat id format: %v", err)
-	}
-
-	patch := appstate.BuildArchive(jid, archive, time.Time{}, nil)
-	return sendAppState(conn, patch)
-}
-
-//#region HANDLER MANAGEMENT
-
-// initializeHandlers creates and configures handlers with proper options
-func (conn *WhatsmeowConnection) initializeHandlers(waOptions *whatsapp.WhatsappOptions, wmOptions WhatsmeowOptions) error {
-	conn.Handlers = NewWhatsmeowHandlers(conn, wmOptions, waOptions)
-	return conn.Handlers.Register()
-}
-
-//#endregion

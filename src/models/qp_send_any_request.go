@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"path"
 	"strings"
+
+	"github.com/nocodeleaks/quepasa/whatsapp"
 )
 
 /*
@@ -28,6 +30,9 @@ type QpSendAnyRequest struct {
 
 	// BASE64 embed content
 	Content string `json:"content,omitempty"`
+
+	// List message content
+	List *whatsapp.WhatsappList `json:"list,omitempty"`
 }
 
 // From BASE64 content
@@ -46,10 +51,10 @@ func (source *QpSendAnyRequest) GenerateEmbedContent() (err error) {
 		// Extract MIME type from data URI
 		header := parts[0]
 		if strings.HasPrefix(header, "data:") && strings.Contains(header, ";base64") {
-			mimePart := header[5:]                      // Remove "data:"
-			mimeType := strings.Split(mimePart, ";")[0] // Get MIME before ";base64"
-			if len(source.Mimetype) == 0 {
-				source.Mimetype = mimeType
+			mimePart := header[5:]                                 // Remove "data:"
+			mimeType := strings.Split(mimePart, ";")[0]            // Get MIME before ";base64"
+			if len(source.Minetype) == 0 {
+				source.Minetype = mimeType
 			}
 		}
 
@@ -67,55 +72,54 @@ func (source *QpSendAnyRequest) GenerateEmbedContent() (err error) {
 	// Set the correct file length for decoded content
 	source.FileLength = uint64(len(decoded))
 
+	// If filename is not set, try to generate one
+	if len(source.FileName) == 0 {
+		source.FileName = "file"
+		if len(source.Minetype) > 0 {
+			exts := strings.Split(source.Minetype, "/")
+			if len(exts) == 2 {
+				source.FileName = fmt.Sprintf("file.%s", exts[1])
+			}
+		}
+	}
+
 	return
 }
 
-// From Url content
+// From URL content
 func (source *QpSendAnyRequest) GenerateUrlContent() (err error) {
-	resp, err := http.Get(source.Url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		err = fmt.Errorf("error on generate url content, unexpected status code: %v", resp.StatusCode)
-
-		logentry := source.GetLogger()
-		logentry.Error(err)
-		return
-	}
-
-	content, err := io.ReadAll(resp.Body)
+	// Download content from URL
+	response, err := http.Get(source.Url)
 	if err != nil {
 		return
 	}
+	defer response.Body.Close()
 
-	source.QpSendRequest.Content = content
-
-	if resp.ContentLength > -1 {
-		source.FileLength = uint64(resp.ContentLength)
+	if response.StatusCode != http.StatusOK {
+		err = fmt.Errorf("failed to download content from URL: %s", source.Url)
+		return
 	}
 
-	if len(source.Mimetype) == 0 {
-		source.Mimetype = resp.Header.Get("Content-Type")
+	// Read content
+	source.QpSendRequest.Content, err = io.ReadAll(response.Body)
+	if err != nil {
+		return
 	}
 
-	// setting filename if empty
+	// Set the correct file length
+	source.FileLength = uint64(len(source.QpSendRequest.Content))
+
+	// If filename is not set, try to get it from URL
 	if len(source.FileName) == 0 {
-		source.FileName = path.Base(source.Url)
-
-		if len(source.FileName) > 0 {
-
-			// unescaping filename from url, on error, just warn ... dont panic
-			filename, unescapeErr := url.QueryUnescape(source.FileName)
-			if unescapeErr != nil {
-				logentry := source.GetLogger()
-				logentry.Warnf("fail to unescape from url, filename: %s, err: %s", source.FileName, unescapeErr)
-			} else {
-				source.FileName = filename
-			}
+		u, errUrl := url.Parse(source.Url)
+		if errUrl == nil {
+			source.FileName = path.Base(u.Path)
 		}
+	}
+
+	// If minetype is not set, try to get it from response header
+	if len(source.Minetype) == 0 {
+		source.Minetype = response.Header.Get("Content-Type")
 	}
 
 	return
