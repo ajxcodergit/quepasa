@@ -43,7 +43,6 @@ func SendAnyWithServer(w http.ResponseWriter, r *http.Request, server *models.Qp
 	request := &models.QpSendAnyRequest{}
 
 	if r.ContentLength > 0 && r.Method == http.MethodPost {
-		// Try to decode the request body into the struct.
 		err := json.NewDecoder(r.Body).Decode(&request)
 		if err != nil {
 			jsonErr := fmt.Errorf("invalid json body: %s", err.Error())
@@ -66,11 +65,9 @@ func SendAnyWithServer(w http.ResponseWriter, r *http.Request, server *models.Qp
 		request.Url = r.URL.Query().Get("url")
 	}
 
-	// trim start and end white spaces
 	request.Url = strings.TrimSpace(request.Url)
 
 	if len(request.Url) > 0 {
-		// download content to byte array
 		err = request.GenerateUrlContent()
 		if err != nil {
 			MessageSendErrors.Inc()
@@ -79,7 +76,6 @@ func SendAnyWithServer(w http.ResponseWriter, r *http.Request, server *models.Qp
 			return
 		}
 	} else if len(request.Content) > 0 {
-		// BASE64 content to byte array
 		err = request.GenerateEmbedContent()
 		if err != nil {
 			MessageSendErrors.Inc()
@@ -108,24 +104,18 @@ func SendRequest(w http.ResponseWriter, r *http.Request, request *models.QpSendR
 
 	att := request.ToWhatsappAttachment()
 
-	// if not set, try to recover "text"
 	if len(request.Text) == 0 {
 		request.Text = GetTextParameter(r)
-		if len(request.Text) > 0 {
-			response.Debug = append(response.Debug, "[debug][SendRequest] 'text' found in parameters")
-		}
 	}
 
-	// if not set, try to recover "in reply"
 	if len(request.InReply) == 0 {
 		request.InReply = GetInReplyParameter(r)
-		if len(request.InReply) > 0 {
-			response.Debug = append(response.Debug, "[debug][SendRequest] 'inreply' found in parameters")
-		}
 	}
 
-	// MODIFIED: Added request.List to the exclusion list to avoid "text not found" error
-	if request.List == nil && request.Poll == nil && request.Location == nil && request.Contact == nil && att.Attach == nil && len(request.Text) == 0 {
+	// MODIFIED: Check for list prefix in text to bypass "text not found"
+	isList := strings.HasPrefix(strings.TrimSpace(request.Text), "list:")
+
+	if !isList && request.Poll == nil && request.Location == nil && request.Contact == nil && att.Attach == nil && len(request.Text) == 0 {
 		MessageSendErrors.Inc()
 		err = fmt.Errorf("text not found, do not send empty messages")
 		response.ParseError(err)
@@ -133,7 +123,6 @@ func SendRequest(w http.ResponseWriter, r *http.Request, request *models.QpSendR
 		return
 	}
 
-	// getting trackid if not passed in request
 	if len(request.TrackId) == 0 {
 		request.TrackId = GetTrackId(r)
 	}
@@ -142,12 +131,10 @@ func SendRequest(w http.ResponseWriter, r *http.Request, request *models.QpSendR
 	Send(server, response, request, w, att.Attach)
 }
 
-// finally sends to the whatsapp server
 func Send(server *models.QpWhatsappServer, response *models.QpSendResponse, request *models.QpSendRequest, w http.ResponseWriter, attach *whatsapp.WhatsappAttachment) {
 	SendWithMessageType(server, response, request, w, attach, whatsapp.UnhandledMessageType)
 }
 
-// SendWithMessageType sends to the whatsapp server with specified message type
 func SendWithMessageType(server *models.QpWhatsappServer, response *models.QpSendResponse, request *models.QpSendRequest, w http.ResponseWriter, attach *whatsapp.WhatsappAttachment, messageType whatsapp.WhatsappMessageType) {
 	waMsg, err := request.ToWhatsappMessage()
 
@@ -164,7 +151,6 @@ func SendWithMessageType(server *models.QpWhatsappServer, response *models.QpSen
 	if len(pollText) > 0 {
 		if strings.HasPrefix(pollText, "poll:") {
 			pollText = pollText[5:]
-
 			var poll *whatsapp.WhatsappPoll
 			err = json.Unmarshal([]byte(pollText), &poll)
 			if err != nil {
@@ -174,8 +160,20 @@ func SendWithMessageType(server *models.QpWhatsappServer, response *models.QpSen
 				RespondInterface(w, response)
 				return
 			}
-
 			waMsg.Poll = poll
+		} else if strings.HasPrefix(pollText, "list:") {
+			// MODIFIED: Support list via text prefix
+			listJson := pollText[5:]
+			var list *whatsapp.WhatsappList
+			err = json.Unmarshal([]byte(listJson), &list)
+			if err != nil {
+				err = fmt.Errorf("error converting text to json list: %s", err.Error())
+				MessageSendErrors.Inc()
+				response.ParseError(err)
+				RespondInterface(w, response)
+				return
+			}
+			waMsg.List = list
 		}
 	}
 
@@ -183,23 +181,18 @@ func SendWithMessageType(server *models.QpWhatsappServer, response *models.QpSen
 		waMsg.Attachment = attach
 		if messageType == whatsapp.UnhandledMessageType {
 			waMsg.Type = whatsapp.GetMessageType(attach)
-			logentry.Debugf("send attachment of type: %v, mime: %s, length: %v, filename: %s", waMsg.Type, attach.Mimetype, attach.FileLength, attach.FileName)
 		} else {
 			waMsg.Type = messageType
-			logentry.Debugf("send attachment (forced type: %v): mime: %s, length: %v, filename: %s", waMsg.Type, attach.Mimetype, attach.FileLength, attach.FileName)
 		}
 	} else {
-		// Only set text type if type was not already set (e.g., by Poll or Location)
 		if waMsg.Type == whatsapp.UnhandledMessageType {
 			waMsg.Type = whatsapp.TextMessageType
 		}
 	}
 
-	// MODIFIED: If it's a list, we don't need text
 	if waMsg.List != nil {
-		// List messages are handled by Send in whatsmeow_connection.go
+		// List messages are handled in whatsmeow_connection.go
 	} else if waMsg.Type == whatsapp.UnhandledMessageType {
-		// correct msg type for texts contents
 		if len(waMsg.Text) > 0 {
 			waMsg.Type = whatsapp.TextMessageType
 		} else {
@@ -210,7 +203,6 @@ func SendWithMessageType(server *models.QpWhatsappServer, response *models.QpSen
 		}
 	}
 
-	// Checking for ready state
 	status := server.GetStatus()
 	if status != whatsapp.Ready {
 		err = fmt.Errorf("whatsapp server is not ready, current status: %v", status)
@@ -220,7 +212,6 @@ func SendWithMessageType(server *models.QpWhatsappServer, response *models.QpSen
 		return
 	}
 
-	// Use the connection's Send method
 	conn, err := server.GetValidConnection()
 	if err != nil {
 		MessageSendErrors.Inc()
