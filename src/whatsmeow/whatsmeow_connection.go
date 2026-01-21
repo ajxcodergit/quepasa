@@ -16,7 +16,6 @@ import (
 	library "github.com/nocodeleaks/quepasa/library"
 	whatsapp "github.com/nocodeleaks/quepasa/whatsapp"
 	whatsmeow "go.mau.fi/whatsmeow"
-	"go.mau.fi/whatsmeow/appstate"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	types "go.mau.fi/whatsmeow/types"
 )
@@ -347,6 +346,7 @@ func (source *WhatsmeowConnection) Send(msg *whatsapp.WhatsappMessage) (whatsapp
 	// validating jid before remote commands as upload or send
 	jid, err := types.ParseJID(formattedDestination)
 	if err != nil {
+		logentry.Infof("send error on get jid: %s", err)
 		return msg, err
 	}
 
