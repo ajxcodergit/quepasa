@@ -30,9 +30,6 @@ type QpSendAnyRequest struct {
 
 	// BASE64 embed content
 	Content string `json:"content,omitempty"`
-
-	// List message content
-	List *whatsapp.WhatsappList `json:"list,omitempty"`
 }
 
 // From BASE64 content
