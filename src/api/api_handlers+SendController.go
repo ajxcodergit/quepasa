@@ -197,7 +197,7 @@ func SendWithMessageType(server *models.QpWhatsappServer, response *models.QpSen
 
 	// MODIFIED: If it's a list, we don't need text
 	if waMsg.List != nil {
-		waMsg.Type = whatsapp.ListMessageType
+		// List messages are handled by Send in whatsmeow_connection.go
 	} else if waMsg.Type == whatsapp.UnhandledMessageType {
 		// correct msg type for texts contents
 		if len(waMsg.Text) > 0 {

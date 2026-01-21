@@ -50,8 +50,8 @@ func (source *QpSendAnyRequest) GenerateEmbedContent() (err error) {
 		if strings.HasPrefix(header, "data:") && strings.Contains(header, ";base64") {
 			mimePart := header[5:]                                 // Remove "data:"
 			mimeType := strings.Split(mimePart, ";")[0]            // Get MIME before ";base64"
-			if len(source.Minetype) == 0 {
-				source.Minetype = mimeType
+			if len(source.Mimetype) == 0 {
+				source.Mimetype = mimeType
 			}
 		}
 
@@ -72,8 +72,8 @@ func (source *QpSendAnyRequest) GenerateEmbedContent() (err error) {
 	// If filename is not set, try to generate one
 	if len(source.FileName) == 0 {
 		source.FileName = "file"
-		if len(source.Minetype) > 0 {
-			exts := strings.Split(source.Minetype, "/")
+		if len(source.Mimetype) > 0 {
+			exts := strings.Split(source.Mimetype, "/")
 			if len(exts) == 2 {
 				source.FileName = fmt.Sprintf("file.%s", exts[1])
 			}
@@ -114,9 +114,9 @@ func (source *QpSendAnyRequest) GenerateUrlContent() (err error) {
 		}
 	}
 
-	// If minetype is not set, try to get it from response header
-	if len(source.Minetype) == 0 {
-		source.Minetype = response.Header.Get("Content-Type")
+	// If mimetype is not set, try to get it from response header
+	if len(source.Mimetype) == 0 {
+		source.Mimetype = response.Header.Get("Content-Type")
 	}
 
 	return
